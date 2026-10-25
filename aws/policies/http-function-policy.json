@@ -1,0 +1,65 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadPollDataItems",
+      "Effect": "Allow",
+      "Action": "dynamodb:GetItem",
+      "Resource": "<TABLE_ARN>"
+    },
+    {
+      "Sid": "QueryPollsAndDiscoveryIndex",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": [
+        "<TABLE_ARN>",
+        "<TABLE_ARN>/index/GSI1"
+      ]
+    },
+    {
+      "Sid": "TransactionalPollAndBallotWrites",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "<TABLE_ARN>",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "dynamodb:EnclosingOperation": [
+            "TransactWriteItems"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "WriteOnlyHttpFunctionLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "<HTTP_LOG_GROUP_ARN>:*"
+    },
+    {
+      "Sid": "ReadVoterKeySecureString",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "<VOTER_KEY_PARAMETER_ARN>"
+    },
+    {
+      "Sid": "DecryptVoterKeyOnlyThroughParameterStore",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.<REGION>.amazonaws.com",
+          "kms:EncryptionContext:PARAMETER_ARN": "<VOTER_KEY_PARAMETER_ARN>"
+        }
+      }
+    }
+  ]
+}

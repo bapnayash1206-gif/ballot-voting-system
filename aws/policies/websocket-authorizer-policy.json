@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ConsumeShortLivedWebSocketTicket",
+      "Effect": "Allow",
+      "Action": "dynamodb:UpdateItem",
+      "Resource": "<TABLE_ARN>"
+    },
+    {
+      "Sid": "WriteOnlyAuthorizerLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "<AUTHORIZER_LOG_GROUP_ARN>:*"
+    }
+  ]
+}

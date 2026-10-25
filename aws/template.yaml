@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Ballot voting API - HTTP-only initial integration preparation (ap-south-1 target)
+
+Parameters:
+  OidcIssuer:
+    Type: String
+    Default: https://accounts.google.com
+    Description: Google OIDC issuer; API Gateway validates token signature, issuer, expiry, and audience.
+  OidcAudience:
+    Type: String
+    Description: Google OAuth Web client ID. Use the same ID in the frontend and local backend.
+  GoogleAdminSubjects:
+    Type: String
+    Default: ''
+    Description: Comma-separated Google sub values assigned as admins. Never accept this from a request.
+  FrontendOrigin:
+    Type: String
+    Default: http://localhost:5174
+    Description: Exact browser origin allowed by HTTP API CORS; set to the approved frontend host later.
+  VoterKeyParameterName:
+    Type: String
+    MinLength: 2
+    MaxLength: 1011
+    AllowedPattern: '^/[A-Za-z0-9_.\-/]+$'
+    ConstraintDescription: Use a hierarchical SSM parameter name beginning with / and containing only letters, digits, slash, dot, underscore, or hyphen.
+    Description: Name of a pre-created SSM Standard SecureString encrypted with the AWS-managed aws/ssm key; the secret value is never a stack parameter.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 10
+    MemorySize: 256
+    Architectures: [arm64]
+
+Resources:
+  BallotData:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-BallotData'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: dev
+      CorsConfiguration:
+        AllowOrigins: [!Ref FrontendOrigin]
+        AllowHeaders: [Authorization, Content-Type, Idempotency-Key]
+        AllowMethods: [GET, POST, PATCH, DELETE, OPTIONS]
+        MaxAge: 300
+      Auth:
+        Authorizers:
+          OidcJwt:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              Issuer: !Ref OidcIssuer
+              Audience: [!Ref OidcAudience]
+        DefaultAuthorizer: OidcJwt
+
+  HttpLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-http'
+      RetentionInDays: 14
+
+  HttpExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: HttpPollDataAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem]
+                Resource: !GetAtt BallotData.Arn
+              - Effect: Allow
+                Action: [dynamodb:Query]
+                Resource: [!GetAtt BallotData.Arn, !Sub '${BallotData.Arn}/index/GSI1']
+              - Effect: Allow
+                Action: [dynamodb:ConditionCheckItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+                Resource: !GetAtt BallotData.Arn
+                Condition:
+                  ForAnyValue:StringEquals:
+                    dynamodb:EnclosingOperation: [TransactWriteItems]
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${HttpLogGroup.Arn}:*'
+              - Effect: Allow
+                Action: [ssm:GetParameter]
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${VoterKeyParameterName}'
+              - Effect: Allow
+                Action: [kms:Decrypt]
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'ssm.${AWS::Region}.${AWS::URLSuffix}'
+                    kms:EncryptionContext:PARAMETER_ARN: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${VoterKeyParameterName}'
+
+  HttpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-http'
+      CodeUri: .
+      Handler: src/http/handler.handler
+      Role: !GetAtt HttpExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref BallotData
+          OIDC_ISSUER: !Ref OidcIssuer
+          OIDC_AUDIENCE: !Ref OidcAudience
+          GOOGLE_ADMIN_SUBJECTS: !Ref GoogleAdminSubjects
+          VOTER_KEY_PARAMETER_NAME: !Ref VoterKeyParameterName
+          VOTE_SHARD_COUNT: '4'
+          RESULT_SHARD_COUNT: '4'
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /health
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+Outputs:
+  HttpApiUrl:
+    Description: Authenticated HTTP API base URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev'
+  DynamoTableName:
+    Value: !Ref BallotData
